@@ -20,3 +20,6 @@ composer.lock
 coverage
 tests/datastore.php
 phpmd.html
+
+# Ignore user plugin configuration
+plugins/*/config.php

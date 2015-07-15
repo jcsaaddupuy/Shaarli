@@ -35,9 +35,18 @@ $GLOBALS['config']['RAINTPL_TPL'] = 'tpl/' ; // Raintpl template directory (keep
 $GLOBALS['config']['UPDATECHECK_FILENAME'] = $GLOBALS['config']['DATADIR'].'/lastupdatecheck.txt'; // For updates check of Shaarli.
 $GLOBALS['config']['UPDATECHECK_INTERVAL'] = 86400 ; // Updates check frequency for Shaarli. 86400 seconds=24 hours
                                           // Note: You must have publisher.php in the same directory as Shaarli index.php
-$GLOBALS['config']['ARCHIVE_ORG'] = false; // For each link, add a link to an archived version on archive.org
 $GLOBALS['config']['ENABLE_RSS_PERMALINKS'] = true;  // Enable RSS permalinks by default. This corresponds to the default behavior of shaarli before this was added as an option.
 $GLOBALS['config']['HIDE_PUBLIC_LINKS'] = false;
+//$GLOBALS['config']['ENABLED_PLUGINS'] = array(
+//    'qrcode', 'archiveorg', 'readityourself', 'demo_plugin', 'playvideos',
+//    'wallabag', 'markdown', 'addlink_toolbar',
+//);
+// Warning: order matters.
+$GLOBALS['config']['ENABLED_PLUGINS'] = array();
+
+// Default plugins, default config - will be overriden by config.php and then plugin's config.php file.
+$GLOBALS['plugins']['READITYOUSELF_URL'] = 'http://someurl.com';
+$GLOBALS['plugins']['WALLABAG_URL'] = 'https://demo.wallabag.org/';
 // -----------------------------------------------------------------------------------------------
 define('shaarli_version','0.5.0');
 // http://server.com/x/shaarli --> /shaarli/
@@ -74,6 +83,8 @@ require_once 'application/LinkDB.php';
 require_once 'application/TimeZone.php';
 require_once 'application/Utils.php';
 require_once 'application/Config.php';
+require_once 'application/Plugin.php';
+require_once 'application/Router.php';
 
 // Ensure the PHP version is supported
 try {
@@ -87,6 +98,9 @@ try {
 include "inc/rain.tpl.class.php"; //include Rain TPL
 raintpl::$tpl_dir = $GLOBALS['config']['RAINTPL_TPL']; // template directory
 raintpl::$cache_dir = $GLOBALS['config']['RAINTPL_TMP']; // cache directory
+
+$pluginManager = PluginManager::getInstance();
+$pluginManager->load($GLOBALS['config']['ENABLED_PLUGINS']);
 
 ob_start();  // Output buffering for the page cache.
 
@@ -1016,14 +1030,29 @@ function showDaily()
         $fill[$index]+=$length;
     }
     $PAGE = new pageBuilder;
-    $PAGE->assign('linksToDisplay',$linksToDisplay);
-    $PAGE->assign('linkcount',count($LINKSDB));
-    $PAGE->assign('cols', $columns);
-    $PAGE->assign('day',linkdate2timestamp($day.'_000000'));
-    $PAGE->assign('previousday',$previousday);
-    $PAGE->assign('nextday',$nextday);
+    $data = array(
+        'linksToDisplay' => $linksToDisplay,
+        'linkcount' => count($LINKSDB),
+        'cols' => $columns,
+        'day' => linkdate2timestamp($day.'_000000'),
+        'previousday' => $previousday,
+        'nextday' => $nextday,
+    );
+    $pluginManager = PluginManager::getInstance();
+    $pluginManager->executeHooks('render_daily', $data, array('loggedin' => isLoggedIn()));
+
+    foreach ($data as $key => $value) {
+        $PAGE->assign($key, $value);
+    }
+
     $PAGE->renderPage('daily');
     exit;
+}
+
+// Renders the linklist
+function showLinkList($PAGE, $LINKSDB) {
+    buildLinkList($PAGE,$LINKSDB); // Compute list of links to display
+    $PAGE->renderPage('linklist');
 }
 
 
@@ -1037,12 +1066,36 @@ function renderPage()
         $GLOBALS['config']['HIDE_PUBLIC_LINKS']
     );
 
+    $PAGE = new pageBuilder;
+
+    // Determine which page will be rendered.
+    $query = (isset($_SERVER['QUERY_STRING'])) ? $_SERVER['QUERY_STRING'] : '';
+    $targetPage = Router::findPage($query, $_GET, isLoggedIn());
+
+    // Call plugin hooks for header, footer and includes, specifying which page will be rendered.
+    // Then asign generated data to RainTPL.
+    $common_hooks = array(
+        'header',
+        'footer',
+        'includes',
+    );
+    $pluginManager = PluginManager::getInstance();
+    foreach($common_hooks as $name) {
+        $plugin_data = array();
+        $pluginManager->executeHooks('render_' . $name, $plugin_data,
+            array(
+                'target' => $targetPage,
+                'loggedin' => isLoggedIn()
+            )
+        );
+        $PAGE->assign('plugins_' . $name, $plugin_data);
+    }
+
     // -------- Display login form.
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=login'))
+    if ($targetPage == Router::$PAGE_LOGIN)
     {
         if ($GLOBALS['config']['OPEN_SHAARLI']) { header('Location: ?'); exit; }  // No need to login for open Shaarli
         $token=''; if (ban_canLogin()) $token=getToken(); // Do not waste token generation if not useful.
-        $PAGE = new pageBuilder;
         $PAGE->assign('token',$token);
         $PAGE->assign('returnurl',(isset($_SERVER['HTTP_REFERER']) ? escape($_SERVER['HTTP_REFERER']):''));
         $PAGE->renderPage('loginform');
@@ -1058,7 +1111,7 @@ function renderPage()
     }
 
     // -------- Picture wall
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=picwall'))
+    if ($targetPage == Router::$PAGE_PICWALL)
     {
         // Optionally filter the results:
         $links=array();
@@ -1081,15 +1134,22 @@ function renderPage()
             }
         }
 
-        $PAGE = new pageBuilder;
-        $PAGE->assign('linkcount',count($LINKSDB));
-        $PAGE->assign('linksToDisplay',$linksToDisplay);
+        $data = array(
+            'linkcount' => count($LINKSDB),
+            'linksToDisplay' => $linksToDisplay,
+        );
+        $pluginManager->executeHooks('render_picwall', $data, array('loggedin' => isLoggedIn()));
+
+        foreach ($data as $key => $value) {
+            $PAGE->assign($key, $value);
+        }
+
         $PAGE->renderPage('picwall');
         exit;
     }
 
     // -------- Tag cloud
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=tagcloud'))
+    if ($targetPage == Router::$PAGE_TAGCLOUD)
     {
         $tags= $LINKSDB->allTags();
 
@@ -1103,9 +1163,17 @@ function renderPage()
         {
             $tagList[$key] = array('count'=>$value,'size'=>log($value, 15) / log($maxcount, 30) * (22-6) + 6);
         }
-        $PAGE = new pageBuilder;
-        $PAGE->assign('linkcount',count($LINKSDB));
-        $PAGE->assign('tags',$tagList);
+
+        $data = array(
+            'linkcount' => count($LINKSDB),
+            'tags' => $tagList,
+        );
+        $pluginManager->executeHooks('render_tagcloud', $data, array('loggedin' => isLoggedIn()));
+
+        foreach ($data as $key => $value) {
+            $PAGE->assign($key, $value);
+        }
+
         $PAGE->renderPage('tagcloud');
         exit;
     }
@@ -1218,27 +1286,31 @@ function renderPage()
 			header('Location: ?do=login&post=');
 			exit;
 		}
-
-        $PAGE = new pageBuilder;
-        buildLinkList($PAGE,$LINKSDB); // Compute list of links to display
-        $PAGE->renderPage('linklist');
+        showLinkList($PAGE, $LINKSDB);
         exit; // Never remove this one! All operations below are reserved for logged in user.
     }
 
     // -------- All other functions are reserved for the registered user:
 
     // -------- Display the Tools menu if requested (import/export/bookmarklet...)
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=tools'))
+    if ($targetPage == Router::$PAGE_TOOLS)
     {
-        $PAGE = new pageBuilder;
-        $PAGE->assign('linkcount',count($LINKSDB));
-        $PAGE->assign('pageabsaddr',indexUrl());
+        $data = array(
+            'linkcount' => count($LINKSDB),
+            'pageabsaddr' => indexUrl(),
+        );
+        $pluginManager->executeHooks('render_tools', $data);
+
+        foreach ($data as $key => $value) {
+            $PAGE->assign($key, $value);
+        }
+
         $PAGE->renderPage('tools');
         exit;
     }
 
     // -------- User wants to change his/her password.
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=changepasswd'))
+    if ($targetPage == Router::$PAGE_CHANGEPASSWORD)
     {
         if ($GLOBALS['config']['OPEN_SHAARLI']) die('You are not supposed to change a password on an Open Shaarli.');
         if (!empty($_POST['setpassword']) && !empty($_POST['oldpassword']))
@@ -1269,7 +1341,6 @@ function renderPage()
         }
         else // show the change password form.
         {
-            $PAGE = new pageBuilder;
             $PAGE->assign('linkcount',count($LINKSDB));
             $PAGE->assign('token',getToken());
             $PAGE->renderPage('changepassword');
@@ -1278,7 +1349,7 @@ function renderPage()
     }
 
     // -------- User wants to change configuration
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=configure'))
+    if ($targetPage == Router::$PAGE_CONFIGURE)
     {
         if (!empty($_POST['title']) )
         {
@@ -1314,7 +1385,6 @@ function renderPage()
         }
         else // Show the configuration form.
         {
-            $PAGE = new pageBuilder;
             $PAGE->assign('linkcount',count($LINKSDB));
             $PAGE->assign('token',getToken());
             $PAGE->assign('title', empty($GLOBALS['title']) ? '' : $GLOBALS['title'] );
@@ -1328,11 +1398,10 @@ function renderPage()
     }
 
     // -------- User wants to rename a tag or delete it
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=changetag'))
+    if ($targetPage == Router::$PAGE_CHANGETAG)
     {
         if (empty($_POST['fromtag']))
         {
-            $PAGE = new pageBuilder;
             $PAGE->assign('linkcount',count($LINKSDB));
             $PAGE->assign('token',getToken());
             $PAGE->assign('tags', $LINKSDB->allTags());
@@ -1377,9 +1446,8 @@ function renderPage()
     }
 
     // -------- User wants to add a link without using the bookmarklet: Show form.
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=addlink'))
+    if ($targetPage == Router::$PAGE_ADDLINK)
     {
-        $PAGE = new pageBuilder;
         $PAGE->assign('linkcount',count($LINKSDB));
         $PAGE->renderPage('addlink');
         exit;
@@ -1398,6 +1466,9 @@ function renderPage()
         $link = array('title'=>trim($_POST['lf_title']),'url'=>$url,'description'=>trim($_POST['lf_description']),'private'=>(isset($_POST['lf_private']) ? 1 : 0),
                       'linkdate'=>$linkdate,'tags'=>str_replace(',',' ',$tags));
         if ($link['title']=='') $link['title']=$link['url']; // If title is empty, use the URL as title.
+
+        $pluginManager->executeHooks('save_link', $link);
+
         $LINKSDB[$linkdate] = $link;
         $LINKSDB->savedb(); // Save to disk.
         pubsubhub();
@@ -1431,6 +1502,9 @@ function renderPage()
         // - confirmation is handled by JavaScript
         // - we are protected from XSRF by the token.
         $linkdate=$_POST['lf_linkdate'];
+
+        $pluginManager->executeHooks('delete_link', $LINKSDB[$linkdate]);
+
         unset($LINKSDB[$linkdate]);
         $LINKSDB->savedb(); // save to disk
 
@@ -1472,13 +1546,20 @@ function renderPage()
     {
         $link = $LINKSDB[$_GET['edit_link']];  // Read database
         if (!$link) { header('Location: ?'); exit; } // Link not found in database.
-        $PAGE = new pageBuilder;
-        $PAGE->assign('linkcount',count($LINKSDB));
-        $PAGE->assign('link',$link);
-        $PAGE->assign('link_is_new',false);
-        $PAGE->assign('token',getToken()); // XSRF protection.
-        $PAGE->assign('http_referer',(isset($_SERVER['HTTP_REFERER']) ? escape($_SERVER['HTTP_REFERER']) : ''));
-        $PAGE->assign('tags', $LINKSDB->allTags());
+        $data = array(
+            'linkcount' => count($LINKSDB),
+            'link' => $link,
+            'link_is_new' => false,
+            'token' => getToken(),
+            'http_referer' => (isset($_SERVER['HTTP_REFERER']) ? escape($_SERVER['HTTP_REFERER']) : ''),
+            'tags' => $LINKSDB->allTags(),
+        );
+        $pluginManager->executeHooks('render_editlink', $data);
+
+        foreach ($data as $key => $value) {
+            $PAGE->assign($key, $value);
+        }
+
         $PAGE->renderPage('editlink');
         exit;
     }
@@ -1557,24 +1638,30 @@ function renderPage()
             $link = array('linkdate'=>$linkdate,'title'=>$title,'url'=>$url,'description'=>$description,'tags'=>$tags,'private'=>$private);
         }
 
-        $PAGE = new pageBuilder;
-        $PAGE->assign('linkcount',count($LINKSDB));
-        $PAGE->assign('link',$link);
-        $PAGE->assign('link_is_new',$link_is_new);
-        $PAGE->assign('token',getToken()); // XSRF protection.
-        $PAGE->assign('http_referer',(isset($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : ''));
-        $PAGE->assign('source',(isset($_GET['source']) ? $_GET['source'] : ''));
-        $PAGE->assign('tags', $LINKSDB->allTags());
+        $data = array(
+            'linkcount' => count($LINKSDB),
+            'link' => $link,
+            'link_is_new' => $link_is_new,
+            'token' => getToken(), // XSRF protection.
+            'http_referer' => (isset($_SERVER['HTTP_REFERER']) ? escape($_SERVER['HTTP_REFERER']) : ''),
+            'source' => (isset($_GET['source']) ? $_GET['source'] : ''),
+            'tags' => $LINKSDB->allTags(),
+        );
+        $pluginManager->executeHooks('render_editlink', $data);
+
+        foreach ($data as $key => $value) {
+            $PAGE->assign($key, $value);
+        }
+
         $PAGE->renderPage('editlink');
         exit;
     }
 
     // -------- Export as Netscape Bookmarks HTML file.
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=export'))
+    if ($targetPage == Router::$PAGE_EXPORT)
     {
         if (empty($_GET['what']))
         {
-            $PAGE = new pageBuilder;
             $PAGE->assign('linkcount',count($LINKSDB));
             $PAGE->renderPage('export');
             exit;
@@ -1626,9 +1713,8 @@ HTML;
     }
 
     // -------- Show upload/import dialog:
-    if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=import'))
+    if ($targetPage == Router::$PAGE_IMPORT)
     {
-        $PAGE = new pageBuilder;
         $PAGE->assign('linkcount',count($LINKSDB));
         $PAGE->assign('token',getToken());
         $PAGE->assign('maxfilesize',getMaxFileSize());
@@ -1637,9 +1723,7 @@ HTML;
     }
 
     // -------- Otherwise, simply display search form and links:
-    $PAGE = new pageBuilder;
-    buildLinkList($PAGE,$LINKSDB); // Compute list of links to display
-    $PAGE->renderPage('linklist');
+    showLinkList($PAGE, $LINKSDB);
     exit;
 }
 
@@ -1810,7 +1894,7 @@ function buildLinkList($PAGE,$LINKSDB)
         $taglist = explode(' ',$link['tags']);
         uasort($taglist, 'strcasecmp');
         $link['taglist']=$taglist;
-
+        $link['shorturl'] = smallHash($link['linkdate']);
         if ($link["url"][0] === '?' && // Check for both signs of a note: starting with ? and 7 chars long. I doubt that you'll post any links that look like this.
             strlen($link["url"]) === 7) {
             $link["url"] = indexUrl() . $link["url"];
@@ -1830,18 +1914,28 @@ function buildLinkList($PAGE,$LINKSDB)
     $token = ''; if (isLoggedIn()) $token=getToken();
 
     // Fill all template fields.
-    $PAGE->assign('linkcount',count($LINKSDB));
-    $PAGE->assign('previous_page_url',$previous_page_url);
-    $PAGE->assign('next_page_url',$next_page_url);
-    $PAGE->assign('page_current',$page);
-    $PAGE->assign('page_max',$pagecount);
-    $PAGE->assign('result_count',count($linksToDisplay));
-    $PAGE->assign('search_type',$search_type);
-    $PAGE->assign('search_crits',$search_crits);
-    $PAGE->assign('redirector',empty($GLOBALS['redirector']) ? '' : $GLOBALS['redirector']); // Optional redirector URL.
-    $PAGE->assign('token',$token);
-    $PAGE->assign('links',$linkDisp);
-    $PAGE->assign('tags', $LINKSDB->allTags());
+    $data = array(
+        'linkcount' => count($LINKSDB),
+        'previous_page_url' => $previous_page_url,
+        'next_page_url' => $next_page_url,
+        'page_current' => $page,
+        'page_max' => $pagecount,
+        'result_count' => count($linksToDisplay),
+        'search_type' => $search_type,
+        'search_crits' => $search_crits,
+        'redirector' => empty($GLOBALS['redirector']) ? '' : $GLOBALS['redirector'],  // Optional redirector URL.
+        'token' => $token,
+        'links' => $linkDisp,
+        'tags' => $LINKSDB->allTags(),
+    );
+
+    $pluginManager = PluginManager::getInstance();
+    $pluginManager->executeHooks('render_linklist', $data, array('loggedin' => isLoggedIn()));
+
+    foreach ($data as $key => $value) {
+        $PAGE->assign($key, $value);
+    }
+
     return;
 }
 
